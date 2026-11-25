@@ -6,7 +6,7 @@
  * @author Claude Code
  */
 
-const CARD_VERSION = '2.3.3';
+const CARD_VERSION = '2.4.1';
 
 console.info(
   `%c GENERATOR-HMI-CARD %c v${CARD_VERSION} %c ISA-101 `,
@@ -183,6 +183,26 @@ class GeneratorHMICard extends HTMLElement {
     return { percent, level, value: num };
   }
 
+  // Maintenance items: config.maintenance as [{label, entity}], where entity is a
+  // card key or a full entity_id. Defaults to the four Genmon counters.
+  _maintenanceItems() {
+    return this._config.maintenance || [
+      { label: 'Oil', entity: 'oil_and_filter_service_due' },
+      { label: 'Air Filter', entity: 'air_filter_service_due' },
+      { label: 'Spark Plug', entity: 'spark_plug_service_due' },
+      { label: 'Battery', entity: 'battery_service_due' },
+    ];
+  }
+
+  // Days until a MM/DD/YYYY date in the value, or null when there is none.
+  _daysUntil(value) {
+    const m = value.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (!m) return null;
+    const due = new Date(+m[3], +m[1] - 1, +m[2]);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return Math.round((due - today) / 86400000);
+  }
+
   _getMaintenanceStatus(value) {
     if (!value || value === '--' || value === 'unavailable' || value === 'unknown') {
       return { level: 0, text: '--' };
@@ -197,14 +217,17 @@ class GeneratorHMICard extends HTMLElement {
       return { level: 3, text: 'OVERDUE' };
     }
     
-    // Parse Genmon format: "142 hrs or 05/27/2027"
-    const hrsMatch = value.match(/^(\d+)\s*hrs?\s/i);
-    if (hrsMatch) {
-      const hours = parseInt(hrsMatch[1], 10);
-      if (hours <= 0) return { level: 3, text: 'DUE' };
-      if (hours <= 20) return { level: 2, text: hours + 'h' };
-      if (hours <= 50) return { level: 1, text: hours + 'h' };
-      return { level: 0, text: 'OK' };
+    // Parse Genmon formats: "142 hrs or 05/27/2027", or a date alone ("05/29/2027").
+    // Whichever limit, hours or date, comes first sets the level.
+    const hrsMatch = value.match(/^(\d+)\s*hrs?\b/i);
+    const days = this._daysUntil(value);
+    if (hrsMatch || days !== null) {
+      const hours = hrsMatch ? parseInt(hrsMatch[1], 10) : Infinity;
+      if (hours <= 0 || (days !== null && days <= 0)) return { level: 3, text: 'DUE' };
+      const byHours = hours <= 20 ? 2 : hours <= 50 ? 1 : 0;
+      const byDays = days === null ? 0 : days <= 14 ? 2 : days <= 30 ? 1 : 0;
+      if (!byHours && !byDays) return { level: 0, text: 'OK' };
+      return byHours >= byDays ? { level: byHours, text: hours + 'h' } : { level: byDays, text: days + 'd' };
     }
     
     // Generic due check
@@ -229,15 +252,18 @@ class GeneratorHMICard extends HTMLElement {
     // Analog values
     const outputV = this._getState('output_voltage');
     const utilityV = this._getState('utility_voltage');
-    const freq = this._getState('frequency');
+    const freq = this._getState('output_frequency');
     const battery = this._getState('battery_voltage');
 
+    // Output voltage and frequency only mean something while the engine runs.
+    // Stopped, they read zero; ISA-101 shows that as normal (gray), not as an alarm.
+    const running = engineStatus.text === 'RUNNING' || parseFloat(this._getState('rpm')) > 0;
     this._updateAnalogBar('output-voltage', outputV, 
-      this._config.voltage_min, this._config.voltage_nominal, this._config.voltage_max, 'V');
+      this._config.voltage_min, this._config.voltage_nominal, this._config.voltage_max, 'V', !running);
     this._updateAnalogBar('utility-voltage', utilityV,
       this._config.voltage_min, this._config.voltage_nominal, this._config.voltage_max, 'V');
     this._updateAnalogBar('frequency', freq,
-      this._config.frequency_min, this._config.frequency_nominal, this._config.frequency_max, 'Hz');
+      this._config.frequency_min, this._config.frequency_nominal, this._config.frequency_max, 'Hz', !running);
     this._updateAnalogBar('battery', battery,
       this._config.battery_min, this._config.battery_nominal, this._config.battery_max, 'V');
 
@@ -247,10 +273,9 @@ class GeneratorHMICard extends HTMLElement {
 
     // Maintenance indicators
     if (this._config.show_maintenance) {
-      this._updateMaintenanceIndicator('oil', this._getMaintenanceStatus(this._getState('oil_and_filter_service_due')));
-      this._updateMaintenanceIndicator('air-filter', this._getMaintenanceStatus(this._getState('air_filter_service_due')));
-      this._updateMaintenanceIndicator('spark-plug', this._getMaintenanceStatus(this._getState('spark_plug_service_due')));
-      this._updateMaintenanceIndicator('battery-svc', this._getMaintenanceStatus(this._getState('battery_service_due')));
+      this._maintenanceItems().forEach((item, i) => {
+        this._updateMaintenanceIndicator(`maint-${i}`, this._getMaintenanceStatus(this._getState(item.entity)));
+      });
     }
 
     // Update button states based on running status
@@ -273,8 +298,9 @@ class GeneratorHMICard extends HTMLElement {
     }
   }
 
-  _updateAnalogBar(id, value, min, nominal, max, unit) {
+  _updateAnalogBar(id, value, min, nominal, max, unit, idle = false) {
     const status = this._getAnalogStatus(value, min, nominal, max);
+    if (idle) status.level = 0;
     const bar = this.shadowRoot.getElementById(`${id}-bar`);
     const valueEl = this.shadowRoot.getElementById(`${id}-value`);
     const container = this.shadowRoot.getElementById(`${id}-container`);
@@ -710,22 +736,11 @@ class GeneratorHMICard extends HTMLElement {
           <div class="maint-section">
             <div class="maint-title">Maintenance Status</div>
             <div class="maint-grid">
-              <div class="maint-item clickable" data-entity="oil_and_filter_service_due">
-                <div class="maint-label">Oil</div>
-                <span class="maint-indicator level-0" id="oil-indicator"><span id="oil-status">--</span></span>
-              </div>
-              <div class="maint-item clickable" data-entity="air_filter_service_due">
-                <div class="maint-label">Air Filter</div>
-                <span class="maint-indicator level-0" id="air-filter-indicator"><span id="air-filter-status">--</span></span>
-              </div>
-              <div class="maint-item clickable" data-entity="spark_plug_service_due">
-                <div class="maint-label">Spark Plug</div>
-                <span class="maint-indicator level-0" id="spark-plug-indicator"><span id="spark-plug-status">--</span></span>
-              </div>
-              <div class="maint-item clickable" data-entity="battery_service_due">
-                <div class="maint-label">Battery</div>
-                <span class="maint-indicator level-0" id="battery-svc-indicator"><span id="battery-svc-status">--</span></span>
-              </div>
+              ${this._maintenanceItems().map((item, i) => `
+              <div class="maint-item clickable" data-entity="${item.entity}">
+                <div class="maint-label">${item.label}</div>
+                <span class="maint-indicator level-0" id="maint-${i}-indicator"><span id="maint-${i}-status">--</span></span>
+              </div>`).join('')}
             </div>
           </div>
           ` : ''}

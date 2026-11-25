@@ -64,6 +64,7 @@ show_maintenance: true
 | `entities` | map | – | Per-entity overrides for non-standard names (see below) |
 | `show_controls` | boolean | `true` | Show control buttons |
 | `show_maintenance` | boolean | `true` | Show maintenance status |
+| `maintenance` | list | Genmon counters | Maintenance items to show, as `label` and `entity` (see below) |
 | `voltage_nominal` | number | `240` | Nominal voltage for bar display |
 | `voltage_min` | number | `220` | Minimum voltage for bar display |
 | `voltage_max` | number | `260` | Maximum voltage for bar display |
@@ -121,7 +122,7 @@ This card expects entities from the Genmon Home Assistant integration. With `dev
 - `sensor.generator_switch_state` - Transfer switch position
 - `sensor.generator_output_voltage` - Generator output voltage
 - `sensor.generator_utility_voltage` - Utility input voltage
-- `sensor.generator_frequency` - Output frequency
+- `sensor.generator_output_frequency` - Output frequency
 - `sensor.generator_rpm` - Engine RPM
 - `sensor.generator_battery_voltage` - Starter battery voltage
 - `sensor.generator_total_run_hours` - Total run hours
@@ -148,6 +149,24 @@ This card follows ISA-101 HMI color standards:
 | Amber | 2 | Warning (attention needed) |
 | Red | 3 | Alarm (action required) |
 
+## Maintenance Items
+
+By default the card shows Genmon's four counters: oil, air filter, spark plug and battery. Controllers that report different counters, such as Evolution's Service A, Service B and battery check, can list their own. `entity` is a card key or a full entity ID:
+
+```yaml
+maintenance:
+  - label: Service A
+    entity: sensor.generator_service_a_due
+  - label: Service B
+    entity: sensor.generator_service_b_due
+  - label: Battery Check
+    entity: sensor.generator_battery_check_due
+```
+
+## Readings While Stopped
+
+Output voltage and frequency come from the generator itself, so they read zero while the engine is stopped. The card shows them gray (normal) until the engine is running or RPM is above zero, rather than as an out-of-range alarm.
+
 ## Maintenance Status Logic
 
 The card parses Genmon's maintenance format (`X hrs or MM/DD/YYYY`):
@@ -158,6 +177,8 @@ The card parses Genmon's maintenance format (`X hrs or MM/DD/YYYY`):
 | 21-50 hrs | Xh | Blue |
 | 1-20 hrs | Xh | Amber |
 | ≤0 hrs | OVERDUE | Red |
+
+A due date (`MM/DD/YYYY`, alone or after the hours) is also checked: blue within 30 days, amber within 14 days, red when due. Whichever of hours or date is closer sets the color.
 
 ## License
 
